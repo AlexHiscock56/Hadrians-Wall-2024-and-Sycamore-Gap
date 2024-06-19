@@ -1,0 +1,83 @@
+install.packages("httr")
+install.packages("jsonlite")
+install.packages("dplyr")
+
+library(httr)
+library(jsonlite)
+library(dplyr)
+
+# bearer token
+bearer_token <- "AAAAAAAAAAAAAAAAAAAAAB9RjAEAAAAAygZUdA%2FmrovHzMrpk1sTJLrlVaY%3DfdTBk1p1QmlBosWAXgRkmAXHyTJXurQeoCx6md0YPhCZyzuqJK"
+
+# Base URL for the Twitter API
+url <- "https://api.twitter.com/2/tweets/search/all"
+
+# Function to fetch tweets
+fetch_tweets <- function(start_time, end_time, file_name, next_token = NULL) {
+  params <- list(
+    "query" = "\"Hadrian\" \"Wall\"",
+    "start_time" = start_time,
+    "end_time" = end_time,
+    "max_results" = 100,
+    "tweet.fields" = "attachments,author_id,context_annotations,conversation_id,created_at,entities,geo,id,in_reply_to_user_id,lang,possibly_sensitive,public_metrics,referenced_tweets,source,text,withheld"
+  )
+  
+  if (!is.null(next_token)) {
+    params["next_token"] <- next_token
+  }
+  
+  res <- GET(url, add_headers(Authorization = paste("Bearer", bearer_token)), query = params)
+  
+  if (status_code(res) == 429) {
+    # Rate limit exceeded, wait before retrying
+    reset_time <- as.numeric(headers(res)$`x-rate-limit-reset`)
+    sleep_time <- max(0, reset_time - as.numeric(Sys.time()))
+    Sys.sleep(sleep_time)
+    res <- GET(url, add_headers(Authorization = paste("Bearer", bearer_token)), query = params)
+  }
+  
+  return(res)
+}
+
+# Function to collect all tweets and save to JSON
+collect_tweets <- function(start_time, end_time, file_name) {
+  all_tweets <- list()
+  next_token <- NULL
+  has_more_results <- TRUE
+  
+  # Loop to fetch all tweets
+  while (has_more_results) {
+    response <- fetch_tweets(start_time, end_time, file_name, next_token)
+    content <- content(response, as = "parsed", type = "application/json")
+    
+    if (!is.null(content$data)) {
+      all_tweets <- append(all_tweets, content$data)
+    }
+    
+    next_token <- content$meta$next_token
+    has_more_results <- !is.null(next_token)
+    
+    # Respect rate limits
+    if (!is.null(headers(response)$`x-rate-limit-remaining`)) {
+      remaining <- as.numeric(headers(response)$`x-rate-limit-remaining`)
+      if (remaining == 0) {
+        reset_time <- as.numeric(headers(response)$`x-rate-limit-reset`)
+        sleep_time <- max(0, reset_time - as.numeric(Sys.time()))
+        Sys.sleep(sleep_time)
+      }
+    }
+  }
+  
+  # Convert the list of tweets to JSON and save to file
+  tweets_json <- toJSON(all_tweets, pretty = TRUE, auto_unbox = TRUE)
+  write(tweets_json, file = file_name)
+}
+
+# usage for DAY 1 2023-09-27
+collect_tweets("2023-09-27T00:01:00Z", "2023-09-27T23:59:00Z", "tweets_2023_09_27.json")
+
+# usage for DAY 2 2023-09-28
+collect_tweets("2023-09-28T00:01:00Z", "2023-09-28T23:59:00Z", "tweets_2023-09-28.json")
+
+# usage for DAY 3 2024-03-28
+collect_tweets("2024-03-28T00:01:00Z", "2024-03-28T23:59:00Z", "tweets_2024-03-28.json")
