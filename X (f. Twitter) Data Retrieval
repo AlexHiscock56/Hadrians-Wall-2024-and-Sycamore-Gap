@@ -1,13 +1,11 @@
-install.packages("httr")
-install.packages("jsonlite")
-install.packages("dplyr")
-
 library(httr)
 library(jsonlite)
 library(dplyr)
+library(stringr)
+library(mongolite)
 
 # bearer token
-bearer_token <- "AAAAAAAAAAAAAAAAAAAAAB9RjAEAAAAAygZUdA%2FmrovHzMrpk1sTJLrlVaY%3DfdTBk1p1QmlBosWAXgRkmAXHyTJXurQeoCx6md0YPhCZyzuqJK"
+bearer_token <- "~"
 
 # Base URL for the Twitter API
 url <- "https://api.twitter.com/2/tweets/search/all"
@@ -81,3 +79,429 @@ collect_tweets("2023-09-28T00:01:00Z", "2023-09-28T23:59:00Z", "tweets_2023-09-2
 
 # usage for DAY 3 2024-03-28
 collect_tweets("2024-03-28T00:01:00Z", "2024-03-28T23:59:00Z", "tweets_2024-03-28.json")
+
+
+# Function to fetch user profile information by user IDs
+fetch_user_profiles <- function(author_ids, bearer_token) {
+  user_profiles <- list()
+  
+  # Split author_ids into chunks to avoid exceeding URL length limit
+  chunk_size <- 100
+  id_chunks <- split(author_ids, ceiling(seq_along(author_ids) / chunk_size))
+  
+  for (id_chunk in id_chunks) {
+    url <- "https://api.twitter.com/2/users"
+    params <- list(
+      "ids" = paste(id_chunk, collapse = ","),
+      "user.fields" = "created_at,description,entities,id,location,most_recent_tweet_id,name,pinned_tweet_id,profile_image_url,protected,public_metrics,url,username,verified,verified_type,withheld"
+    )
+    
+    res <- GET(url, add_headers(Authorization = paste("Bearer", bearer_token)), query = params)
+    
+    if (status_code(res) == 429) {
+      reset_time <- as.numeric(headers(res)$`x-rate-limit-reset`)
+      sleep_time <- max(0, reset_time - as.numeric(Sys.time()))
+      Sys.sleep(sleep_time)
+      res <- GET(url, add_headers(Authorization = paste("Bearer", bearer_token)), query = params)
+    }
+    
+    if (status_code(res) != 200) {
+      stop("Error fetching user profiles: ", content(res, as = "text"))
+    }
+    
+    content <- content(res, as = "parsed", type = "application/json")
+    if (!is.null(content$data)) {
+      user_profiles <- append(user_profiles, content$data)
+    }
+  }
+  
+  return(user_profiles)
+}
+
+# Function to read author_ids from a JSON file and fetch user profiles
+get_user_profiles_from_json <- function(json_file, bearer_token) {
+  tweets <- fromJSON(json_file, simplifyVector = FALSE)
+  author_ids <- unique(sapply(tweets, function(tweet) tweet[["author_id"]]))
+  
+  user_profiles <- fetch_user_profiles(author_ids, bearer_token)
+  
+  return(user_profiles)
+}
+
+# Usage
+json_fileDay_1 <- "tweets_2023_09_27.json" 
+json_fileDay_2 <- "tweets_2023-09-28.json" 
+json_fileDay_3 <- "tweets_2024-03-28.json" 
+
+user_profilesDay_1 <- get_user_profiles_from_json(json_fileDay_1, bearer_token)
+user_profilesDay_2 <- get_user_profiles_from_json(json_fileDay_2, bearer_token)
+user_profilesDay_3 <- get_user_profiles_from_json(json_fileDay_3, bearer_token)
+
+# Convert user profiles to JSON and save to a file
+user_profiles_jsonDay_1 <- toJSON(user_profilesDay_1, pretty = TRUE, auto_unbox = TRUE)
+user_profiles_jsonDay_2 <- toJSON(user_profilesDay_2, pretty = TRUE, auto_unbox = TRUE)
+user_profiles_jsonDay_3 <- toJSON(user_profilesDay_3, pretty = TRUE, auto_unbox = TRUE)
+
+write(user_profiles_jsonDay_1, file = "user_profilestweets_2023_09_27.json")
+write(user_profiles_jsonDay_2, file = "user_profilestweets_2023-09-28.json")
+write(user_profiles_jsonDay_3, file = "user_profilestweets_2024-03-28.json")
+
+
+
+# Merging these. Day 1
+# Convert user profiles JSON to a data frame
+Users_Data_Day_1_Joinable <- fromJSON(user_profiles_jsonDay_1) %>%
+  rename(author_id = id) %>%
+  rename(account_created = created_at)
+
+# Load tweet data (assuming this is loaded from a JSON file or another source)
+tweets_data <- fromJSON("tweets_2023_09_27.json")
+
+# Perform the full join
+CombData_Day_1 <- full_join(tweets_data, Users_Data_Day_1_Joinable, by = 'author_id')
+CombData_Day_1 <- CombData_Day_1[!duplicated(CombData_Day_1$id),]
+
+# Select and mutate columns
+FULLDay_1_Tweets <- CombData_Day_1 %>%
+  select(-possibly_sensitive, -edit_history_tweet_ids, -protected, -profile_image_url) %>%
+  mutate(Code = paste0("TW.", seq_len(nrow(CombData_Day_1))))
+
+# Step 1: Identify unique authors and mentions
+author_ids <- FULLDay_1_Tweets$author_id
+
+# Extract mention IDs from entities.x
+mention_ids <- unlist(lapply(FULLDay_1_Tweets$entities.x, function(entity) {
+  if (!is.null(entity$mentions)) {
+    return(sapply(entity$mentions, function(mention) mention$id))
+  } else {
+    return(NULL)
+  }
+}))
+
+# Combine and deduplicate IDs
+all_unique_ids <- unique(c(author_ids, mention_ids))
+
+# Step 2: Generate a sequence of codes for these authors
+author_codes <- paste0("TW.Auth.", seq_along(all_unique_ids))
+
+# Step 3: Create a mapping from unique authors to their codes
+author_code_mapping <- setNames(author_codes, all_unique_ids)
+
+# Apply the mapping to create a new column in the dataframe
+FULLDay_1_Tweets$Author_Code <- author_code_mapping[FULLDay_1_Tweets$author_id]
+
+# Modify the entities.x field
+modify_entities_x <- function(entity) {
+  if (!is.null(entity$mentions)) {
+    entity$mentions <- lapply(entity$mentions, function(mention) {
+      mention$Author_Code <- author_code_mapping[mention$id]
+      mention$username <- NULL  # Remove the username column
+      return(mention)
+    })
+  }
+  return(entity)
+}
+
+FULLDay_1_Tweets <- FULLDay_1_Tweets %>%
+  rowwise() %>%
+  mutate(entities.x = list(modify_entities_x(entities.x))) %>%
+  ungroup()
+
+# Removing the name column
+FULLDay_1_Tweets <- FULLDay_1_Tweets %>%
+  select(-name)
+
+# Anonymise mentions in text, replacing them with "@Mention"
+FULLDay_1_Tweets <- FULLDay_1_Tweets %>%
+  mutate(text = str_replace_all(text, "@\\w+", "@Mention"))
+
+# Create Codes_Names_AuthIds data frame
+FULLDay_1_TweetsCodes_Names_AuthIds <- data.frame(
+  FULLDay_1_TweetsAuthor_Code = FULLDay_1_Tweets$Author_Code,
+  FULLDay_1_TweetsUsername = FULLDay_1_Tweets$username,
+  FULLDay_1_TweetsAuthor_ID = FULLDay_1_Tweets$author_id
+)
+
+# Convert FULLDay_1_Tweets to JSON and save to a file
+FULLDay_1_Tweets_json <- toJSON(FULLDay_1_Tweets, pretty = TRUE, auto_unbox = TRUE)
+write(FULLDay_1_Tweets_json, file = "FULLDay_1_Tweets.json")
+
+# Save Codes_Names_AuthIds to a file (if needed)
+write.csv(FULLDay_1_TweetsCodes_Names_AuthIds, file = "FULLDay_1_TweetsCodes_Names_AuthIds.csv", row.names = FALSE)
+
+
+
+
+# Merging these. Day 2
+# Convert user profiles JSON to a data frame
+Users_Data_Day_2_Joinable <- fromJSON(user_profiles_jsonDay_2) %>%
+  rename(author_id = id) %>%
+  rename(account_created = created_at)
+
+# Load tweet data (assuming this is loaded from a JSON file or another source)
+tweets_data <- fromJSON("tweets_2023-09-28.json")
+
+# Perform the full join
+CombData_Day_2 <- full_join(tweets_data, Users_Data_Day_2_Joinable, by = 'author_id')
+CombData_Day_2 <- CombData_Day_2[!duplicated(CombData_Day_2$id),]
+
+# Select and mutate columns
+FULLDay_2_Tweets <- CombData_Day_2 %>%
+  select(-possibly_sensitive, -edit_history_tweet_ids, -protected, -profile_image_url) %>%
+  mutate(Code = paste0("TW.", seq_len(nrow(CombData_Day_2))))
+
+# Step 1: Identify unique authors and mentions
+author_ids <- FULLDay_2_Tweets$author_id
+
+# Extract mention IDs from entities.x
+mention_ids <- unlist(lapply(FULLDay_2_Tweets$entities.x, function(entity) {
+  if (!is.null(entity$mentions)) {
+    return(sapply(entity$mentions, function(mention) mention$id))
+  } else {
+    return(NULL)
+  }
+}))
+
+# Combine and deduplicate IDs
+all_unique_ids <- unique(c(author_ids, mention_ids))
+
+# Step 2: Generate a sequence of codes for these authors
+author_codes <- paste0("TW.Auth.", seq_along(all_unique_ids))
+
+# Step 3: Create a mapping from unique authors to their codes
+author_code_mapping <- setNames(author_codes, all_unique_ids)
+
+# Apply the mapping to create a new column in the dataframe
+FULLDay_2_Tweets$Author_Code <- author_code_mapping[FULLDay_2_Tweets$author_id]
+
+# Modify the entities.x field
+modify_entities_x <- function(entity) {
+  if (!is.null(entity$mentions)) {
+    entity$mentions <- lapply(entity$mentions, function(mention) {
+      mention$Author_Code <- author_code_mapping[mention$id]
+      mention$username <- NULL  # Remove the username column
+      return(mention)
+    })
+  }
+  return(entity)
+}
+
+FULLDay_2_Tweets <- FULLDay_2_Tweets %>%
+  rowwise() %>%
+  mutate(entities.x = list(modify_entities_x(entities.x))) %>%
+  ungroup()
+
+# Removing the name column
+FULLDay_2_Tweets <- FULLDay_2_Tweets %>%
+  select(-name)
+
+# Anonymise mentions in text, replacing them with "@Mention"
+FULLDay_2_Tweets <- FULLDay_2_Tweets %>%
+  mutate(text = str_replace_all(text, "@\\w+", "@Mention"))
+
+# Create Codes_Names_AuthIds data frame
+FULLDay_2_TweetsCodes_Names_AuthIds <- data.frame(
+  FULLDay_2_TweetsAuthor_Code = FULLDay_2_Tweets$Author_Code,
+  FULLDay_2_TweetsUsername = FULLDay_2_Tweets$username,
+  FULLDay_2_TweetsAuthor_ID = FULLDay_2_Tweets$author_id
+)
+
+# Convert FULLDay_2_Tweets to JSON and save to a file
+FULLDay_2_Tweets_json <- toJSON(FULLDay_2_Tweets, pretty = TRUE, auto_unbox = TRUE)
+write(FULLDay_2_Tweets_json, file = "FULLDay_2_Tweets.json")
+
+# Save Codes_Names_AuthIds to a file (if needed)
+write.csv(FULLDay_2_TweetsCodes_Names_AuthIds, file = "FULLDay_2_TweetsCodes_Names_AuthIds.csv", row.names = FALSE)
+
+
+
+
+
+
+# Merging these. Day 3
+# Convert user profiles JSON to a data frame
+Users_Data_Day_3_Joinable <- fromJSON(user_profiles_jsonDay_3) %>%
+  rename(author_id = id) %>%
+  rename(account_created = created_at)
+
+# Load tweet data (assuming this is loaded from a JSON file or another source)
+tweets_data <- fromJSON("tweets_2024-03-28.json")
+
+# Perform the full join
+CombData_Day_3 <- full_join(tweets_data, Users_Data_Day_3_Joinable, by = 'author_id')
+CombData_Day_3 <- CombData_Day_3[!duplicated(CombData_Day_3$id),]
+
+# Select and mutate columns
+FULLDay_3_Tweets <- CombData_Day_3 %>%
+  select(-possibly_sensitive, -edit_history_tweet_ids, -protected, -profile_image_url) %>%
+  mutate(Code = paste0("TW.", seq_len(nrow(CombData_Day_3))))
+
+# Step 1: Identify unique authors and mentions
+author_ids <- FULLDay_3_Tweets$author_id
+
+# Extract mention IDs from entities.x
+mention_ids <- unlist(lapply(FULLDay_3_Tweets$entities.x, function(entity) {
+  if (!is.null(entity$mentions)) {
+    return(sapply(entity$mentions, function(mention) mention$id))
+  } else {
+    return(NULL)
+  }
+}))
+
+# Combine and deduplicate IDs
+all_unique_ids <- unique(c(author_ids, mention_ids))
+
+# Step 2: Generate a sequence of codes for these authors
+author_codes <- paste0("TW.Auth.", seq_along(all_unique_ids))
+
+# Step 3: Create a mapping from unique authors to their codes
+author_code_mapping <- setNames(author_codes, all_unique_ids)
+
+# Apply the mapping to create a new column in the dataframe
+FULLDay_3_Tweets$Author_Code <- author_code_mapping[FULLDay_3_Tweets$author_id]
+
+# Modify the entities.x field
+modify_entities_x <- function(entity) {
+  if (!is.null(entity$mentions)) {
+    entity$mentions <- lapply(entity$mentions, function(mention) {
+      mention$Author_Code <- author_code_mapping[mention$id]
+      mention$username <- NULL  # Remove the username column
+      return(mention)
+    })
+  }
+  return(entity)
+}
+
+FULLDay_3_Tweets <- FULLDay_3_Tweets %>%
+  rowwise() %>%
+  mutate(entities.x = list(modify_entities_x(entities.x))) %>%
+  ungroup()
+
+# Removing the name column
+FULLDay_3_Tweets <- FULLDay_3_Tweets %>%
+  select(-name)
+
+# Anonymise mentions in text, replacing them with "@Mention"
+FULLDay_3_Tweets <- FULLDay_3_Tweets %>%
+  mutate(text = str_replace_all(text, "@\\w+", "@Mention"))
+
+# Create Codes_Names_AuthIds data frame
+FULLDay_3_TweetsCodes_Names_AuthIds <- data.frame(
+  FULLDay_3_TweetsAuthor_Code = FULLDay_3_Tweets$Author_Code,
+  FULLDay_3_TweetsUsername = FULLDay_3_Tweets$username,
+  FULLDay_3_TweetsAuthor_ID = FULLDay_3_Tweets$author_id
+)
+
+# Convert FULLDay_2_Tweets to JSON and save to a file
+FULLDay_3_Tweets_json <- toJSON(FULLDay_3_Tweets, pretty = TRUE, auto_unbox = TRUE)
+write(FULLDay_3_Tweets_json, file = "FULLDay_3_Tweets.json")
+
+# Save Codes_Names_AuthIds to a file (if needed)
+write.csv(FULLDay_3_TweetsCodes_Names_AuthIds, file = "FULLDay_3_TweetsCodes_Names_AuthIds.csv", row.names = FALSE)
+
+TextsDay_1_Tweets <- FULLDay_1_Tweets %>% select(Text = text, Code, Author_Code)
+TextsDay_2_Tweets <- FULLDay_2_Tweets %>% select(Text = text, Code, Author_Code)
+TextsDay_3_Tweets <- FULLDay_3_Tweets %>% select(Text = text, Code, Author_Code)
+
+connection_string <- "~"
+
+Mongodb <- mongo(db = "Hadrians_Wall", url = connection_string)
+
+collections <- c("Texts_Day_1_Tweets", "Texts_Day_2_Tweets", "Texts_Day_3_Tweets")
+
+
+# Create a list of dataframes
+data_list <- list(TextsDay_1_Tweets, TextsDay_2_Tweets, TextsDay_3_Tweets)
+
+# Loop through each collection name and corresponding dataframe
+for (i in 1:length(collections)) {
+  collection_name <- collections[i]
+  data <- data_list[[i]]
+  
+  # Connect to the specific collection
+  collection <- mongo(collection = collection_name, db = "Hadrians_Wall" , url = connection_string)
+  
+  # Insert the dataframe into the MongoDB collection
+  collection$insert(data)
+
+  # Close the connection to this collection
+  collection$disconnect()
+}
+
+# Close the main database connection
+Mongodb$disconnect()
+
+
+
+Also Creating non-Retweet Options
+
+# Assuming you have the dplyr package installed
+library(dplyr)
+
+# Filtering rows where 'text' column does not contain 'RT'
+NoRTs_FULLDay_1_Tweets <- FULLDay_1_Tweets %>%
+  filter(!grepl('RT', text))
+NoRTs_FULLDay_2_Tweets <- FULLDay_2_Tweets %>%
+  filter(!grepl('RT', text))
+NoRTs_FULLDay_3_Tweets <- FULLDay_3_Tweets %>%
+  filter(!grepl('RT', text))
+
+NoRTsTextsDay_1_Tweets <- NoRTs_FULLDay_1_Tweets %>% select(Text = text, Code, Author_Code)
+NoRTsTextsDay_2_Tweets <- NoRTs_FULLDay_2_Tweets %>% select(Text = text, Code, Author_Code)
+NoRTsTextsDay_3_Tweets <- NoRTs_FULLDay_3_Tweets %>% select(Text = text, Code, Author_Code)
+
+collections2 <- c("NoRTsTexts_Day_1_Tweets", "NoRTsTexts_Day_2_Tweets", "NoRTsTexts_Day_3_Tweets")
+
+
+# Create a list of dataframes
+data_list2 <- list(NoRTsTextsDay_1_Tweets, NoRTsTextsDay_2_Tweets, NoRTsTextsDay_3_Tweets)
+
+# Loop through each collection name and corresponding dataframe
+for (i in 1:length(collections2)) {
+  collection_name <- collections2[i]
+  data <- data_list2[[i]]
+  
+  # Connect to the specific collection
+  collection <- mongo(collection = collection_name, db = "Hadrians_Wall" , url = connection_string)
+  
+  # Insert the dataframe into the MongoDB collection
+  collection$insert(data)
+
+  # Close the connection to this collection
+  collection$disconnect()
+}
+
+# Close the main database connection
+Mongodb$disconnect()
+
+NoRTsDay1Tweets_27.09.23 <- FULLDay_1_Tweets %>%
+  filter(!grepl('RT', text))
+NoRTsDay2Tweets_28.09.23 <- FULLDay_2_Tweets %>%
+  filter(!grepl('RT', text))
+NoRTsDay3Tweets_28.03.24 <- FULLDay_3_Tweets %>%
+  filter(!grepl('RT', text))
+
+
+collections3 <- c("NoRTsDay1Tweets_27.09.23", "NoRTsDay2Tweets_28.09.23", "NoRTsDay3Tweets_28.03.24")
+
+
+# Create a list of dataframes
+data_list3 <- list(NoRTsDay1Tweets_27.09.23, NoRTsDay2Tweets_28.09.23, NoRTsDay3Tweets_28.03.24)
+
+# Loop through each collection name and corresponding dataframe
+for (i in 1:length(collections3)) {
+  collection_name <- collections3[i]
+  data <- data_list3[[i]]
+  
+  # Connect to the specific collection
+  collection <- mongo(collection = collection_name, db = "Hadrians_Wall" , url = connection_string)
+  
+  # Insert the dataframe into the MongoDB collection
+  collection$insert(data)
+
+  # Close the connection to this collection
+  collection$disconnect()
+}
+
+# Close the main database connection
+Mongodb$disconnect()
